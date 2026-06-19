@@ -2,10 +2,10 @@
 项目管理 API - 项目CRUD、文件上传、评分标准管理
 """
 import os
-import json
 import uuid
 from typing import List
 
+import aiofiles
 from fastapi import APIRouter, Depends, HTTPException, UploadFile, File, Form, BackgroundTasks
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,6 +24,33 @@ from app.schemas.project import (
 )
 
 router = APIRouter()
+
+
+def _project_response(project: Project, document_count: int = 0, task_count: int = 0) -> ProjectResponse:
+    """Build a project response with calculated counters."""
+    return ProjectResponse(
+        id=project.id,
+        name=project.name,
+        description=project.description,
+        bid_number=project.bid_number,
+        status=project.status,
+        created_by=project.created_by,
+        created_at=project.created_at,
+        updated_at=project.updated_at,
+        document_count=document_count,
+        task_count=task_count,
+    )
+
+
+async def _get_owned_project(project_id: int, db: AsyncSession, current_user: User) -> Project:
+    """Load a project and ensure it belongs to the current user."""
+    result = await db.execute(select(Project).where(Project.id == project_id))
+    project = result.scalar_one_or_none()
+    if not project:
+        raise HTTPException(status_code=404, detail="项目不存在")
+    if project.created_by != current_user.id:
+        raise HTTPException(status_code=403, detail="无权访问此项目")
+    return project
 
 
 # --- Project CRUD ---
@@ -48,12 +75,11 @@ async def list_projects(
         task_count = await db.execute(
             select(func.count(ReviewTask.id)).where(ReviewTask.project_id == p.id)
         )
-        resp = ProjectResponse(
-            **{k: getattr(p, k) for k in ProjectResponse.model_fields},
+        response.append(_project_response(
+            p,
             document_count=doc_count.scalar() or 0,
             task_count=task_count.scalar() or 0,
-        )
-        response.append(resp)
+        ))
     return response
 
 
@@ -73,11 +99,7 @@ async def create_project(
     db.add(project)
     await db.flush()
     await db.refresh(project)
-    return ProjectResponse(
-        **{k: getattr(project, k) for k in ProjectResponse.model_fields},
-        document_count=0,
-        task_count=0,
-    )
+    return _project_response(project, document_count=0, task_count=0)
 
 
 @router.get("/{project_id}", response_model=ProjectDetail)
@@ -87,16 +109,14 @@ async def get_project(
     current_user: User = Depends(get_current_user),
 ):
     """Get project detail with documents and scoring criteria."""
+    project = await _get_owned_project(project_id, db, current_user)
+
     result = await db.execute(
         select(Project)
         .options(selectinload(Project.documents), selectinload(Project.scoring_criteria))
         .where(Project.id == project_id)
     )
-    project = result.scalar_one_or_none()
-    if not project:
-        raise HTTPException(status_code=404, detail="项目不存在")
-    if project.created_by != current_user.id:
-        raise HTTPException(status_code=403, detail="无权访问此项目")
+    project = result.scalar_one()
 
     doc_count = await db.execute(
         select(func.count(ProjectDocument.id)).where(ProjectDocument.project_id == project_id)
@@ -106,9 +126,11 @@ async def get_project(
     )
 
     return ProjectDetail(
-        **{k: getattr(project, k) for k in ProjectResponse.model_fields},
-        document_count=doc_count.scalar() or 0,
-        task_count=task_count.scalar() or 0,
+        **_project_response(
+            project,
+            document_count=doc_count.scalar() or 0,
+            task_count=task_count.scalar() or 0,
+        ).model_dump(),
         documents=[DocumentResponse.model_validate(d) for d in project.documents],
         scoring_criteria=[ScoringCriteriaResponse.model_validate(s) for s in project.scoring_criteria],
     )
@@ -121,12 +143,7 @@ async def delete_project(
     current_user: User = Depends(get_current_user),
 ):
     """Delete a project and all its associated data."""
-    result = await db.execute(select(Project).where(Project.id == project_id))
-    project = result.scalar_one_or_none()
-    if not project:
-        raise HTTPException(status_code=404, detail="项目不存在")
-    if project.created_by != current_user.id:
-        raise HTTPException(status_code=403, detail="无权删除此项目")
+    project = await _get_owned_project(project_id, db, current_user)
 
     await db.delete(project)
     return {"message": "项目已删除"}
@@ -137,23 +154,21 @@ async def delete_project(
 @router.post("/{project_id}/documents", response_model=DocumentResponse, status_code=201)
 async def upload_document(
     project_id: int,
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     doc_type: str = Form("tender_doc"),  # scoring_criteria, tender_doc, supplementary
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
     """Upload a document to a project."""
-    # Verify project exists and user has access
-    result = await db.execute(select(Project).where(Project.id == project_id))
-    project = result.scalar_one_or_none()
-    if not project:
-        raise HTTPException(status_code=404, detail="项目不存在")
-    if project.created_by != current_user.id:
-        raise HTTPException(status_code=403, detail="无权操作此项目")
+    await _get_owned_project(project_id, db, current_user)
+
+    if doc_type not in {"scoring_criteria", "tender_doc", "supplementary"}:
+        raise HTTPException(status_code=400, detail=f"不支持的文档类型: {doc_type}")
 
     # Validate file type
-    allowed_extensions = {".pdf", ".docx", ".doc", ".txt"}
-    ext = os.path.splitext(file.filename)[1].lower()
+    allowed_extensions = {".pdf", ".docx", ".txt"}
+    ext = os.path.splitext(file.filename or "")[1].lower()
     if ext not in allowed_extensions:
         raise HTTPException(status_code=400, detail=f"不支持的文件格式: {ext}")
 
@@ -165,9 +180,22 @@ async def upload_document(
     safe_filename = f"{file_id}{ext}"
     file_path = os.path.join(project_dir, safe_filename)
 
-    content = await file.read()
-    with open(file_path, "wb") as f:
-        f.write(content)
+    max_bytes = settings.MAX_FILE_SIZE_MB * 1024 * 1024
+    file_size = 0
+    async with aiofiles.open(file_path, "wb") as out_file:
+        while chunk := await file.read(1024 * 1024):
+            file_size += len(chunk)
+            if file_size > max_bytes:
+                await out_file.close()
+                try:
+                    os.remove(file_path)
+                except FileNotFoundError:
+                    pass
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"文件超过大小限制: {settings.MAX_FILE_SIZE_MB}MB",
+                )
+            await out_file.write(chunk)
 
     # Create document record
     doc = ProjectDocument(
@@ -175,16 +203,16 @@ async def upload_document(
         doc_type=doc_type,
         filename=file.filename,
         file_path=file_path,
-        file_size=len(content),
+        file_size=file_size,
         status="uploaded",
     )
     db.add(doc)
     await db.flush()
     await db.refresh(doc)
+    await db.commit()
 
     # Trigger background parsing
     from app.tasks.document_tasks import parse_document_task
-    background_tasks = BackgroundTasks()
     background_tasks.add_task(parse_document_task, doc.id)
 
     return DocumentResponse.model_validate(doc)
@@ -199,6 +227,7 @@ async def list_criteria(
     current_user: User = Depends(get_current_user),
 ):
     """List scoring criteria for a project."""
+    await _get_owned_project(project_id, db, current_user)
     result = await db.execute(
         select(ScoringCriteria)
         .where(ScoringCriteria.project_id == project_id)
@@ -215,6 +244,7 @@ async def create_criteria(
     current_user: User = Depends(get_current_user),
 ):
     """Manually add a scoring criteria item."""
+    await _get_owned_project(project_id, db, current_user)
     criteria = ScoringCriteria(
         project_id=project_id,
         **data.model_dump(),
@@ -233,6 +263,7 @@ async def batch_create_criteria(
     current_user: User = Depends(get_current_user),
 ):
     """Batch create scoring criteria items."""
+    await _get_owned_project(project_id, db, current_user)
     created = []
     for item in items:
         criteria = ScoringCriteria(
@@ -254,6 +285,7 @@ async def delete_criteria(
     current_user: User = Depends(get_current_user),
 ):
     """Delete a scoring criteria item."""
+    await _get_owned_project(project_id, db, current_user)
     result = await db.execute(
         select(ScoringCriteria).where(
             ScoringCriteria.id == criteria_id,

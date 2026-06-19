@@ -237,7 +237,7 @@ async function handleResultUpdate(result: ResultWithReview) {
   try {
     await reviewApi.updateResult(result.id, {
       reviewer_status: result._reviewer_status,
-      reviewer_score: result._reviewer_score || undefined,
+      reviewer_score: result._reviewer_score ?? undefined,
       reviewer_comment: result._reviewer_comment || undefined,
     })
   } catch (e: any) {

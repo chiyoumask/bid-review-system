@@ -33,7 +33,7 @@ async def register(data: UserCreate, db: AsyncSession = Depends(get_db)):
         email=data.email,
         hashed_password=hash_password(data.password),
         display_name=data.display_name or data.username,
-        role=data.role,
+        role="reviewer",
     )
     db.add(user)
     await db.flush()

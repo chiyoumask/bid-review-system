@@ -163,13 +163,18 @@ async function loadProviders() {
 }
 
 async function handleAddProvider() {
-  if (!providerForm.name || !providerForm.api_key || !providerForm.model_name) {
+  const payload = {
+    ...providerForm,
+    base_url: providerForm.base_url || defaultBaseUrl.value,
+    model_name: providerForm.model_name || defaultModelName.value,
+  }
+  if (!payload.name || !payload.api_key || !payload.base_url || !payload.model_name) {
     message.warning('请填写必要字段')
     return
   }
   adding.value = true
   try {
-    await settingsApi.addLLMProvider(providerForm as LLMProvider)
+    await settingsApi.addLLMProvider(payload as LLMProvider)
     message.success('渠道已添加')
     showAddProvider.value = false
     Object.assign(providerForm, { name: '', api_key: '', base_url: '', model_name: '' })

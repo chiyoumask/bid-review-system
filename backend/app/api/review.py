@@ -4,7 +4,7 @@
 from datetime import datetime
 from typing import List
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
@@ -30,9 +30,11 @@ async def list_tasks(
     current_user: User = Depends(get_current_user),
 ):
     """List review tasks, optionally filtered by project."""
-    query = select(ReviewTask)
+    query = select(ReviewTask).join(Project, ReviewTask.project_id == Project.id).where(
+        Project.created_by == current_user.id
+    )
     if project_id:
-        query = query.where(ReviewTask.project_id == project_id)
+        query = query.where(Project.id == project_id)
     query = query.order_by(ReviewTask.created_at.desc())
 
     result = await db.execute(query)
@@ -43,6 +45,7 @@ async def list_tasks(
 @router.post("/tasks", response_model=ReviewTaskResponse, status_code=201)
 async def create_review_task(
     data: ReviewTaskCreate,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ):
@@ -51,10 +54,16 @@ async def create_review_task(
     project = await db.get(Project, data.project_id)
     if not project:
         raise HTTPException(status_code=404, detail="项目不存在")
+    if project.created_by != current_user.id:
+        raise HTTPException(status_code=403, detail="无权操作此项目")
 
     document = await db.get(ProjectDocument, data.bid_document_id)
     if not document or document.project_id != data.project_id:
         raise HTTPException(status_code=404, detail="投标文件不存在或不属于该项目")
+    if document.doc_type != "tender_doc":
+        raise HTTPException(status_code=400, detail="请选择投标文件发起审核")
+    if document.status != "parsed":
+        raise HTTPException(status_code=400, detail="投标文件尚未解析完成")
 
     # Check scoring criteria exist
     criteria_result = await db.execute(
@@ -75,11 +84,11 @@ async def create_review_task(
     db.add(task)
     await db.flush()
     await db.refresh(task)
+    await db.commit()
 
     # Trigger background analysis
     from app.tasks.document_tasks import analyze_bid_task
-    import asyncio
-    asyncio.create_task(analyze_bid_task(task.id))
+    background_tasks.add_task(analyze_bid_task, task.id)
 
     return ReviewTaskResponse.model_validate(task)
 
@@ -94,7 +103,8 @@ async def get_review_task(
     result = await db.execute(
         select(ReviewTask)
         .options(selectinload(ReviewTask.results))
-        .where(ReviewTask.id == task_id)
+        .join(Project, ReviewTask.project_id == Project.id)
+        .where(ReviewTask.id == task_id, Project.created_by == current_user.id)
     )
     task = result.scalar_one_or_none()
     if not task:
@@ -115,11 +125,21 @@ async def update_review_result(
 ):
     """Update a review result (human review/override)."""
     result = await db.execute(
-        select(ReviewResult).where(ReviewResult.id == result_id)
+        select(ReviewResult)
+        .join(ReviewTask, ReviewResult.task_id == ReviewTask.id)
+        .join(Project, ReviewTask.project_id == Project.id)
+        .where(ReviewResult.id == result_id, Project.created_by == current_user.id)
     )
     review_result = result.scalar_one_or_none()
     if not review_result:
         raise HTTPException(status_code=404, detail="审核结果不存在")
+    if data.reviewer_status not in {"pending", "confirmed", "overridden", "ignored"}:
+        raise HTTPException(status_code=400, detail="不支持的复核状态")
+    if data.reviewer_status == "overridden":
+        if data.reviewer_score is None:
+            raise HTTPException(status_code=400, detail="调整评分不能为空")
+        if data.reviewer_score < 0 or data.reviewer_score > review_result.max_score:
+            raise HTTPException(status_code=400, detail="调整评分超出该项满分范围")
 
     review_result.reviewer_status = data.reviewer_status
     review_result.reviewer_score = data.reviewer_score
@@ -140,7 +160,8 @@ async def finalize_review(
     result = await db.execute(
         select(ReviewTask)
         .options(selectinload(ReviewTask.results))
-        .where(ReviewTask.id == task_id)
+        .join(Project, ReviewTask.project_id == Project.id)
+        .where(ReviewTask.id == task_id, Project.created_by == current_user.id)
     )
     task = result.scalar_one_or_none()
     if not task:
@@ -149,6 +170,8 @@ async def finalize_review(
     # Calculate final scores
     total_score = 0
     for r in task.results:
+        if r.reviewer_status == "ignored":
+            continue
         if r.reviewer_status == "overridden" and r.reviewer_score is not None:
             total_score += r.reviewer_score
         elif r.ai_estimated_score is not None:

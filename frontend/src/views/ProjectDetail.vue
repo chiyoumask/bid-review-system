@@ -18,7 +18,7 @@
       <a-col :span="14">
         <a-card title="📄 项目文档" style="margin-bottom: 16px">
           <template #extra>
-            <a-upload :before-upload="handleUpload" :show-upload-list="false" accept=".pdf,.docx,.doc,.txt">
+            <a-upload :before-upload="handleUpload" :show-upload-list="false" accept=".pdf,.docx,.txt">
               <a-button type="primary" size="small"><UploadOutlined /> 上传文档</a-button>
             </a-upload>
           </template>
@@ -91,7 +91,7 @@
             </a-button>
           </template>
 
-          <a-upload :before-upload="handleUploadCriteria" :show-upload-list="false" accept=".pdf,.docx,.doc,.txt">
+          <a-upload :before-upload="handleUploadCriteria" :show-upload-list="false" accept=".pdf,.docx,.txt">
             <a-button type="dashed" block style="margin-bottom: 16px">
               <UploadOutlined /> 上传评分标准文件（AI自动解析）
             </a-button>
@@ -331,8 +331,12 @@ onMounted(async () => {
   // Poll for task status updates
   pollTimer = window.setInterval(async () => {
     const hasPending = tasks.value.some(t => t.status === 'analyzing' || t.status === 'pending')
+    const hasParsingDocs = (project.value?.documents || []).some(d => d.status === 'uploaded' || d.status === 'parsing')
     if (hasPending) {
       await loadTasks()
+    }
+    if (hasParsingDocs) {
+      await loadProject()
     }
   }, 5000)
 })

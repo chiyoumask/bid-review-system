@@ -108,7 +108,7 @@ fi
 # ===== 构建前端 =====
 log_step "构建前端"
 
-if [ -d "frontend" ] && [ ! -d "frontend/dist" ]; then
+if [ -d "frontend" ]; then
     log_info "构建前端..."
     cd frontend
 
@@ -122,8 +122,6 @@ if [ -d "frontend" ] && [ ! -d "frontend/dist" ]; then
     npm run build
     cd ..
     log_info "前端构建完成"
-elif [ -d "frontend/dist" ]; then
-    log_info "前端已构建，跳过"
 else
     log_warn "未找到前端目录，跳过"
 fi
@@ -148,6 +146,11 @@ sleep 10
 # ===== 验证 =====
 log_step "验证部署"
 
+FRONTEND_HTTP_PORT=$(grep -E '^FRONTEND_HTTP_PORT=' .env | tail -n1 | cut -d= -f2 || true)
+FRONTEND_BIND=$(grep -E '^FRONTEND_BIND=' .env | tail -n1 | cut -d= -f2 || true)
+FRONTEND_HTTP_PORT=${FRONTEND_HTTP_PORT:-8080}
+FRONTEND_BIND=${FRONTEND_BIND:-127.0.0.1}
+
 # 检查容器状态
 echo ""
 docker compose ps 2>/dev/null || docker-compose ps
@@ -160,7 +163,7 @@ else
 fi
 
 # 检查 Nginx
-if curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1 | grep -q "200"; then
+if curl -s -o /dev/null -w "%{http_code}" "http://127.0.0.1:${FRONTEND_HTTP_PORT}" | grep -q "200"; then
     log_info "Nginx: 正常"
 else
     log_warn "Nginx: 可能还在启动中"
@@ -177,7 +180,12 @@ echo -e "${GREEN}╔════════════════════
 echo -e "${GREEN}║     招投标文件智能审核系统 - Docker 部署完成      ║${NC}"
 echo -e "${GREEN}╚══════════════════════════════════════════════════╝${NC}"
 echo ""
-echo -e "  访问地址:    ${CYAN}http://${PUBLIC_IP}${NC}"
+if [ "${FRONTEND_BIND}" = "127.0.0.1" ]; then
+    echo -e "  宝塔反代目标: ${CYAN}http://127.0.0.1:${FRONTEND_HTTP_PORT}${NC}"
+    echo -e "  公开访问地址: ${YELLOW}请在宝塔站点中绑定域名并反向代理到上方地址${NC}"
+else
+    echo -e "  访问地址:    ${CYAN}http://${PUBLIC_IP}:${FRONTEND_HTTP_PORT}${NC}"
+fi
 echo ""
 echo -e "  管理员账号:  ${YELLOW}admin${NC}（首次登录时注册）"
 echo -e "  数据库密码:  ${YELLOW}${DB_PASS}${NC}"
@@ -197,7 +205,7 @@ echo ""
 # 保存部署信息
 cat > "${PROJECT_DIR}/deploy-info.txt" << EOF
 部署时间: $(date '+%Y-%m-%d %H:%M:%S')
-访问地址: http://${PUBLIC_IP}
+宝塔反代目标: http://127.0.0.1:${FRONTEND_HTTP_PORT}
 数据库密码: ${DB_PASS}
 部署方式: Docker Compose
 项目目录: ${PROJECT_DIR}

@@ -2,7 +2,8 @@
 文档解析和审核任务 - 后台异步执行
 """
 import logging
-from datetime import datetime
+import zipfile
+import xml.etree.ElementTree as ET
 
 from sqlalchemy import select
 from sqlalchemy.orm import selectinload
@@ -10,8 +11,9 @@ from sqlalchemy.orm import selectinload
 from app.core.database import async_session
 from app.core.config import settings
 from app.models.project import (
-    ProjectDocument, ScoringCriteria, ReviewTask, ReviewResult
+    Project, ProjectDocument, ScoringCriteria, ReviewTask, ReviewResult
 )
+from app.models.settings import LLMProvider
 from app.services.pdf_parser import PDFParser
 from app.services.llm_client import LLMClient
 from app.services.scoring_parser import ScoringParser
@@ -21,12 +23,52 @@ from app.services.comparison_engine import ComparisonEngine
 logger = logging.getLogger(__name__)
 
 
-def _get_llm_client() -> LLMClient:
-    """Get an LLM client with the first active provider."""
-    # For MVP, use default config from settings
-    # TODO: load from configured providers
-    if not settings.LLM_API_KEY:
-        raise ValueError("未配置 LLM API Key，请在系统设置中配置")
+def _extract_docx_text(file_path: str) -> str:
+    """Extract plain text from a DOCX file using the document XML."""
+    paragraphs = []
+    namespace = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+    with zipfile.ZipFile(file_path) as docx:
+        xml_content = docx.read("word/document.xml")
+    root = ET.fromstring(xml_content)
+    for paragraph in root.findall(".//w:p", namespace):
+        texts = [node.text or "" for node in paragraph.findall(".//w:t", namespace)]
+        line = "".join(texts).strip()
+        if line:
+            paragraphs.append(line)
+    return "\n".join(paragraphs)
+
+
+def _read_text_file(file_path: str) -> str:
+    """Read a plain text file with common Chinese encoding fallback."""
+    for encoding in ("utf-8-sig", "utf-8", "gb18030"):
+        try:
+            with open(file_path, "r", encoding=encoding) as f:
+                return f.read()
+        except UnicodeDecodeError:
+            continue
+    with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+        return f.read()
+
+
+async def _get_llm_client(db, user_id: int | None = None) -> LLMClient:
+    """Get an LLM client from the user's active providers, then env fallback."""
+    if user_id is not None:
+        result = await db.execute(
+            select(LLMProvider)
+            .where(LLMProvider.created_by == user_id, LLMProvider.is_active.is_(True))
+            .order_by(LLMProvider.priority.asc(), LLMProvider.id.asc())
+        )
+        provider = result.scalar_one_or_none()
+        if provider:
+            return LLMClient(
+                api_key=provider.api_key,
+                base_url=provider.base_url,
+                model=provider.model_name,
+                timeout=settings.LLM_TIMEOUT,
+            )
+
+    if not settings.LLM_API_KEY or settings.LLM_API_KEY == "your-api-key-here":
+        raise ValueError("未配置 LLM API Key，请在系统设置中添加可用渠道")
     return LLMClient(
         api_key=settings.LLM_API_KEY,
         base_url=settings.LLM_BASE_URL,
@@ -57,15 +99,19 @@ async def parse_document_task(document_id: int):
                     "tables": result["tables"],
                     "pages": [{"page": p["page"], "char_count": len(p["text"])} for p in result["pages"]],
                 }
+            elif doc.file_path.lower().endswith(".docx"):
+                doc.parsed_text = _extract_docx_text(doc.file_path)
+            elif doc.file_path.lower().endswith(".txt"):
+                doc.parsed_text = _read_text_file(doc.file_path)
             else:
-                # For .txt files, read directly
-                with open(doc.file_path, "r", encoding="utf-8") as f:
-                    doc.parsed_text = f.read()
+                raise ValueError("不支持的文件格式，请上传 PDF、DOCX 或 TXT")
 
             # If this is a scoring criteria document, parse it with LLM
             if doc.doc_type == "scoring_criteria" and doc.parsed_text:
+                llm = None
                 try:
-                    llm = _get_llm_client()
+                    project = await db.get(Project, doc.project_id)
+                    llm = await _get_llm_client(db, project.created_by if project else None)
                     parser = ScoringParser(llm)
                     parsed = await parser.parse_with_retry(doc.parsed_text)
 
@@ -92,12 +138,14 @@ async def parse_document_task(document_id: int):
                             db.add(criteria)
                             sort_order += 1
 
-                    await llm.close()
                     doc.status = "parsed"
                 except Exception as e:
                     logger.error(f"Failed to parse scoring criteria with LLM: {e}")
                     doc.status = "error"
                     doc.error_message = f"评分标准解析失败: {str(e)}"
+                finally:
+                    if llm:
+                        await llm.close()
             else:
                 doc.status = "parsed"
 
@@ -122,6 +170,7 @@ async def analyze_bid_task(task_id: int):
     This is the main analysis pipeline.
     """
     async with async_session() as db:
+        llm = None
         try:
             task = await db.get(ReviewTask, task_id)
             if not task:
@@ -156,7 +205,7 @@ async def analyze_bid_task(task_id: int):
             task.total_possible_score = total_score
 
             # Initialize LLM client
-            llm = _get_llm_client()
+            llm = await _get_llm_client(db, task.created_by)
             bid_analyzer = BidAnalyzer(llm)
             comparator = ComparisonEngine(llm)
 
@@ -228,7 +277,6 @@ async def analyze_bid_task(task_id: int):
             task.summary = evaluation.get("overall_summary", "")
             task.status = "completed"
 
-            await llm.close()
             await db.commit()
             logger.info(f"Review task {task_id} completed")
 
@@ -242,3 +290,6 @@ async def analyze_bid_task(task_id: int):
                     await db.commit()
             except Exception:
                 pass
+        finally:
+            if llm:
+                await llm.close()

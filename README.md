@@ -4,11 +4,11 @@
 
 ## 功能特性
 
-- **评分标准解析**：上传评分标准 PDF，AI 自动提取评分维度、分值和细则
+- **评分标准解析**：上传评分标准 PDF、DOCX 或 TXT，AI 自动提取评分维度、分值和细则
 - **投标文件分析**：AI 逐项提取投标文件中与评分标准对应的内容
 - **智能评分比对**：AI 对每个评分项进行预估评分和风险判定
 - **人工复核**：支持确认、调整、忽略每项 AI 评审结果
-- **多 LLM 渠道**：支持 DeepSeek、通义千问、OpenAI 等多种 LLM API
+- **多 LLM 渠道**：支持 DeepSeek、通义千问、OpenAI 等多种 LLM API，渠道配置持久化保存
 - **项目管理**：完整的项目生命周期管理
 
 ## 技术栈
@@ -37,9 +37,14 @@ cd bid-review-system
 # 3. 一键部署
 chmod +x deploy/docker-deploy.sh
 bash deploy/docker-deploy.sh
+
+# 4. 在宝塔面板中创建站点，并设置反向代理
+#    目标 URL: http://127.0.0.1:8080
 ```
 
-脚本会自动：配置环境变量 → 构建前端 → 构建 Docker 镜像 → 启动所有服务。
+脚本会自动：配置环境变量 → 构建前端 → 构建 Docker 镜像 → 启动所有服务。更新部署时会重新构建前端静态文件。
+
+> 宝塔面板通常会占用服务器的 80/443 端口。本项目 Docker Compose 默认把前端容器绑定到宿主机 `127.0.0.1:8080`，公网域名、HTTPS 证书和访问入口建议交给宝塔站点反向代理处理。
 
 ### 方式二：手动 Docker 部署
 
@@ -58,6 +63,8 @@ docker compose up -d
 docker compose ps
 docker compose logs -f backend
 ```
+
+手动部署完成后，在宝塔面板中将站点反向代理到 `http://127.0.0.1:8080`。如果服务器没有使用宝塔 Nginx，也可以在 `.env` 中改为 `FRONTEND_BIND=0.0.0.0`、`FRONTEND_HTTP_PORT=80` 让容器直接暴露公网 80 端口。
 
 ### 方式三：本地开发
 
@@ -154,10 +161,23 @@ cat backup.sql | docker compose exec -T db psql -U bid_review -d bid_review
 |------|------|------|------|
 | `SECRET_KEY` | ✅ | JWT 密钥，随机生成 | `openssl rand -hex 32` |
 | `DB_PASSWORD` | ✅ | 数据库密码 | 随机强密码 |
+| `DATABASE_URL` | Docker 自动配置 / 本地必填 | 后端数据库连接地址 | `postgresql+asyncpg://bid_review:密码@db:5432/bid_review` |
 | `LLM_API_KEY` | ✅ | LLM API 密钥 | `sk-xxx...` |
 | `LLM_BASE_URL` | ✅ | LLM API 地址 | `https://api.deepseek.com/v1` |
 | `LLM_MODEL` | ✅ | 模型名称 | `deepseek-chat` |
 | `CORS_ORIGINS` | 可选 | 允许的前端地址 | `["http://IP"]` |
+| `FRONTEND_BIND` | 可选 | Docker 前端宿主机绑定地址，宝塔部署推荐仅本机 | `127.0.0.1` |
+| `FRONTEND_HTTP_PORT` | 可选 | Docker 前端宿主机端口，宝塔反代目标端口 | `8080` |
+
+## ✅ 已完善的稳定性与安全点
+
+- Docker 后端监听 `0.0.0.0:8000`，Nginx 容器可正常反向代理到后端。
+- Docker Compose 会显式注入 `DATABASE_URL`，后端连接 `db` 服务而不是容器内 `localhost`。
+- Docker 前端默认绑定 `127.0.0.1:8080`，适配宝塔面板反向代理和 SSL 管理。
+- 上传文档使用后台任务解析，并按 `MAX_FILE_SIZE_MB` 限制文件大小。
+- 项目、评分标准、审核任务和复核结果均校验当前登录用户的项目归属。
+- 系统设置中的 LLM 渠道保存到数据库，审核任务会优先使用当前项目创建者启用的渠道。
+- 支持上传 `PDF / DOCX / TXT`，旧版二进制 `.doc` 请先转换为 PDF 或 DOCX。
 
 ## 📄 License
 

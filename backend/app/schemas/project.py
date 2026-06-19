@@ -160,3 +160,5 @@ class LLMProviderResponse(BaseModel):
     is_active: bool
     priority: int
     # api_key is never returned
+
+    model_config = {"from_attributes": True}

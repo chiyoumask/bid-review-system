@@ -38,6 +38,8 @@ services:
     restart: unless-stopped
     env_file:
       - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://bid_review:${DB_PASSWORD}@db:5432/bid_review
     depends_on:
       db:
         condition: service_healthy
@@ -69,8 +71,8 @@ services:
       backend:
         condition: service_healthy
     ports:
-      - "80:80"
-      - "443:443"
+      # 宝塔面板通常占用公网 80/443；默认仅绑定本机端口，由宝塔反向代理到 http://127.0.0.1:8080
+      - "${FRONTEND_BIND:-127.0.0.1}:${FRONTEND_HTTP_PORT:-8080}:80"
     deploy:
       resources:
         limits:
