@@ -19,7 +19,7 @@
 | 后端 | Python FastAPI + SQLAlchemy |
 | 数据库 | PostgreSQL 15 |
 | AI | LLM API（DeepSeek / 通义千问 / OpenAI 兼容接口） |
-| 部署 | Docker Compose + Nginx |
+| 部署 | Docker Compose + 前端多阶段 Docker 构建 + Nginx |
 
 ## 🚀 快速开始（Docker 部署）
 
@@ -42,7 +42,7 @@ bash deploy/docker-deploy.sh
 #    目标 URL: http://127.0.0.1:8080
 ```
 
-脚本会自动：配置环境变量 → 构建前端 → 构建 Docker 镜像 → 启动所有服务。更新部署时会重新构建前端静态文件。
+脚本会自动：配置环境变量 → 构建前后端 Docker 镜像 → 启动所有服务。前端会在 Docker 多阶段构建中自动执行依赖安装和生产打包，不需要在 VPS 宿主机安装 Node.js。
 
 > 宝塔面板通常会占用服务器的 80/443 端口。本项目 Docker Compose 默认把前端容器绑定到宿主机 `127.0.0.1:8080`，公网域名、HTTPS 证书和访问入口建议交给宝塔站点反向代理处理。
 
@@ -53,13 +53,10 @@ bash deploy/docker-deploy.sh
 cp .env.example .env
 vi .env   # 填入 LLM_API_KEY 等配置
 
-# 2. 构建前端
-cd frontend && npm install && npm run build && cd ..
+# 2. 构建并启动服务
+docker compose up -d --build
 
-# 3. 启动服务
-docker compose up -d
-
-# 4. 查看状态
+# 3. 查看状态
 docker compose ps
 docker compose logs -f backend
 ```
@@ -104,6 +101,7 @@ bid-review-system/
 │   │   ├── router/            # Vue Router 路由
 │   │   ├── stores/            # Pinia 状态管理
 │   │   └── views/             # 页面视图
+│   ├── Dockerfile              # 前端多阶段构建：Node 打包 + Nginx 托管
 │   └── package.json
 ├── deploy/                     # 部署配置
 │   ├── bt-panel/              # 宝塔面板原生部署脚本
@@ -165,7 +163,7 @@ cat backup.sql | docker compose exec -T db psql -U bid_review -d bid_review
 | `LLM_API_KEY` | ✅ | LLM API 密钥 | `sk-xxx...` |
 | `LLM_BASE_URL` | ✅ | LLM API 地址 | `https://api.deepseek.com/v1` |
 | `LLM_MODEL` | ✅ | 模型名称 | `deepseek-chat` |
-| `CORS_ORIGINS` | 可选 | 允许的前端地址 | `["http://IP"]` |
+| `CORS_ORIGINS` | 可选 | 允许的前端地址，必须是 JSON 数组 | `["http://IP","https://your-domain.com"]` |
 | `FRONTEND_BIND` | 可选 | Docker 前端宿主机绑定地址，宝塔部署推荐仅本机 | `127.0.0.1` |
 | `FRONTEND_HTTP_PORT` | 可选 | Docker 前端宿主机端口，宝塔反代目标端口 | `8080` |
 
@@ -173,6 +171,7 @@ cat backup.sql | docker compose exec -T db psql -U bid_review -d bid_review
 
 - Docker 后端监听 `0.0.0.0:8000`，Nginx 容器可正常反向代理到后端。
 - Docker Compose 会显式注入 `DATABASE_URL`，后端连接 `db` 服务而不是容器内 `localhost`。
+- 前端已 Docker 化，Compose 构建时自动生成静态文件，不依赖宿主机 `frontend/dist`。
 - Docker 前端默认绑定 `127.0.0.1:8080`，适配宝塔面板反向代理和 SSL 管理。
 - 上传文档使用后台任务解析，并按 `MAX_FILE_SIZE_MB` 限制文件大小。
 - 项目、评分标准、审核任务和复核结果均校验当前登录用户的项目归属。

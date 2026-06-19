@@ -105,26 +105,9 @@ else
     log_info ".env 已存在，跳过生成"
 fi
 
-# ===== 构建前端 =====
-log_step "构建前端"
-
-if [ -d "frontend" ]; then
-    log_info "构建前端..."
-    cd frontend
-
-    if ! command -v node &>/dev/null; then
-        log_info "安装 Node.js..."
-        curl -fsSL https://rpm.nodesource.com/setup_18.x | bash - 2>/dev/null || true
-        yum install -y nodejs 2>/dev/null || apt-get install -y nodejs 2>/dev/null || true
-    fi
-
-    npm install --registry=https://registry.npmmirror.com
-    npm run build
-    cd ..
-    log_info "前端构建完成"
-else
-    log_warn "未找到前端目录，跳过"
-fi
+# ===== Docker 镜像构建 =====
+log_step "构建 Docker 镜像"
+log_info "前端将在 Docker 多阶段构建中自动执行 npm install 和 npm run build"
 
 # ===== 启动 Docker 容器 =====
 log_step "启动 Docker 容器"
@@ -132,12 +115,9 @@ log_step "启动 Docker 容器"
 # 停止旧容器
 docker compose down 2>/dev/null || docker-compose down 2>/dev/null || true
 
-# 构建并启动
-log_info "构建后端镜像..."
-docker compose build --no-cache backend 2>/dev/null || docker-compose build --no-cache backend
-
-log_info "启动所有服务..."
-docker compose up -d 2>/dev/null || docker-compose up -d
+# 构建并启动所有服务
+log_info "构建并启动所有服务..."
+docker compose up -d --build 2>/dev/null || docker-compose up -d --build
 
 # 等待启动
 log_info "等待服务启动..."
